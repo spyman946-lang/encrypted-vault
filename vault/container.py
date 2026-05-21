@@ -54,6 +54,7 @@ from .timelock import (
     seal_timelock,
     verify_timelock_sealed,
 )
+from . import exe_embed
 
 FAIL_SEAL_MAX = 64
 FLAG_TIMELOCK = 0x0001
@@ -100,6 +101,7 @@ class VaultContainer:
     entries: dict[str, VaultEntry] = field(default_factory=dict)
     data_start: int = 0
     settings: VaultSettings = field(default_factory=load_settings)
+    _embed_exe: Path | None = field(default=None, repr=False)
 
     @property
     def iterations(self) -> int:
@@ -116,8 +118,7 @@ class VaultContainer:
         timelock: TimeLockPolicy | None = None,
     ) -> VaultContainer:
         path = Path(path)
-        if path.exists():
-            raise FileExistsError(f"Контейнер уже существует: {path}")
+        work, embed = exe_embed.resolve_vault_path_for_create(path)
 
         cfg = settings or load_settings()
         pwd, tl = validate_create(
@@ -170,18 +171,22 @@ class VaultContainer:
         )
         manifest = {"files": {}}
 
-        with open(path, "wb") as f:
+        with open(work, "wb") as f:
             cls._write_header(f, header)
             data_start = cls._write_manifest(f, key, manifest)
 
+        if embed is not None:
+            exe_embed.after_create(work, embed)
+
         return cls(
-            path=path,
+            path=work,
             key=key,
             salt=salt,
             header=header,
             entries={},
             data_start=data_start,
             settings=cfg,
+            _embed_exe=embed,
         )
 
     @classmethod
@@ -194,12 +199,19 @@ class VaultContainer:
         skip_timelock_check: bool = False,
     ) -> VaultContainer:
         path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"Контейнер не найден: {path}")
+        if exe_embed.is_embed_target(path):
+            if not exe_embed.has_embedded_vault(path):
+                raise FileNotFoundError(f"В exe нет встроенного контейнера: {path}")
+            work = exe_embed.materialize_work_copy(path)
+            embed = path.resolve()
+        else:
+            if not path.exists():
+                raise FileNotFoundError(f"Контейнер не найден: {path}")
+            work, embed = path, None
 
         cfg = settings or load_settings()
 
-        with open(path, "rb") as f:
+        with open(work, "rb") as f:
             header = cls._read_header(f)
 
         mode = header.protection
@@ -212,7 +224,7 @@ class VaultContainer:
                 raise TimeLockError(str(e)) from e
 
         if mode_uses_password(mode):
-            cls._apply_pre_delay(path, header, cfg)
+            cls._apply_pre_delay(work, header, cfg)
 
         if mode == ProtectionMode.TIMELOCK:
             key = derive_timelock_key(
@@ -241,7 +253,7 @@ class VaultContainer:
                 pepper=cfg.kdf_pepper,
             )
             if not verify_password(key, header.pwd_check):
-                cls._on_wrong_password(path, header, cfg)
+                cls._on_wrong_password(work, header, cfg, embed_exe=embed)
 
         if mode_uses_timelock(mode):
             try:
@@ -255,15 +267,15 @@ class VaultContainer:
             sealed = open_fail_count(key, header.fail_sealed) or 0
             effective = max(header.fail_open, sealed)
             if cfg.max_failed_attempts > 0 and effective >= cfg.max_failed_attempts:
-                cls._destroy_vault(path, cfg)
+                cls._destroy_vault(path, cfg, embed_exe=embed)
                 raise VaultDestroyedError(
                     "Контейнер уничтожен: превышен лимит неверных попыток (в т.ч. до прошлого открытия)."
                 )
             header.fail_open = 0
             header.fail_sealed = seal_fail_count(key, 0)
-            cls._write_header_fields(path, header)
+            cls._write_header_fields(work, header)
 
-        with open(path, "rb") as f:
+        with open(work, "rb") as f:
             cls._read_header(f)
             manifest, data_start = cls._read_manifest(f, key)
 
@@ -279,11 +291,12 @@ class VaultContainer:
             )
 
         return cls(
-            path=path,
+            path=work,
             key=key,
             salt=header.salt,
             header=header,
             entries=entries,
+            _embed_exe=embed,
             data_start=data_start,
             settings=cfg,
         )
@@ -300,10 +313,19 @@ class VaultContainer:
         )
 
     @classmethod
-    def _on_wrong_password(cls, path: Path, header: VaultHeader, cfg: VaultSettings) -> None:
+    def _on_wrong_password(
+        cls,
+        path: Path,
+        header: VaultHeader,
+        cfg: VaultSettings,
+        *,
+        embed_exe: Path | None = None,
+    ) -> None:
         if header.version >= VERSION_SECURE:
             header.fail_open += 1
             cls._write_header_fields(path, header)
+            if embed_exe is not None:
+                exe_embed.after_persist(path, embed_exe)
             brute_force_delay(
                 header.fail_open,
                 min_delay=cfg.min_delay_seconds,
@@ -313,7 +335,7 @@ class VaultContainer:
             limit = cfg.max_failed_attempts
             if limit > 0 and header.fail_open >= limit:
                 if cfg.destroy_on_max_attempts:
-                    cls._destroy_vault(path, cfg)
+                    cls._destroy_vault(path, cfg, embed_exe=embed_exe)
                     raise VaultDestroyedError(
                         f"Контейнер уничтожен после {header.fail_open} неверных попыток ввода пароля."
                     )
@@ -335,7 +357,16 @@ class VaultContainer:
         )
 
     @classmethod
-    def _destroy_vault(cls, path: Path, cfg: VaultSettings) -> None:
+    def _destroy_vault(
+        cls,
+        path: Path,
+        cfg: VaultSettings,
+        *,
+        embed_exe: Path | None = None,
+    ) -> None:
+        if embed_exe is not None:
+            exe_embed.destroy_embedded(embed_exe)
+            return
         secure_destroy_file(path, passes=3)
         sidecar = Path(str(path) + ".attempts")
         if sidecar.exists():
@@ -555,6 +586,8 @@ class VaultContainer:
             with open(self.path, "rb") as f:
                 self.header = self._read_header(f)
                 _, self.data_start = self._read_manifest(f, self.key)
+            if self._embed_exe is not None:
+                exe_embed.after_persist(self.path, self._embed_exe)
         except Exception:
             if tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
@@ -680,6 +713,15 @@ class VaultContainer:
 
     @classmethod
     def read_header_public(cls, path: Path) -> VaultHeader:
+        path = Path(path)
+        if exe_embed.is_embed_target(path):
+            vault = exe_embed.read_embedded_vault_bytes(path)
+            if vault is None:
+                raise ValueError("В exe нет встроенного контейнера")
+            import io
+
+            with io.BytesIO(vault) as f:
+                return cls._read_header(f)
         with open(path, "rb") as f:
             return cls._read_header(f)
 

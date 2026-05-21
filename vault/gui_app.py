@@ -9,6 +9,7 @@ import threading
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+import tkinter
 from tkinter import END, BooleanVar, StringVar, Tk, Toplevel, filedialog, messagebox, ttk
 
 from .app_store import (
@@ -19,13 +20,15 @@ from .app_store import (
     save_app_config,
     set_login_password,
     settings_path,
+    vault_exists,
     vault_path,
     verify_login_password,
 )
 from .container import VaultContainer
-from .protection import ProtectionMode
+from .protection import ProtectionMode, mode_uses_password, mode_uses_timelock
 from .settings import VaultSettings, load_settings, save_settings
 from .timelock import TimeLockPolicy
+from .time_verify import format_utc
 
 
 class PasswordDialog(Toplevel):
@@ -111,6 +114,131 @@ def _log_error(text: str) -> None:
         pass
 
 
+PROGRAM_INTRO = """Encrypted Vault — зашифрованное хранилище файлов
+
+Возможности программы:
+
+• Встроенный контейнер — все файлы хранятся внутри программы (в exe),
+  дополнительно сжимаются (LZMA) и шифруются (AES-256-GCM).
+
+• Защита паролем — Argon2id, отдельный ключ на каждый файл (HKDF + AES-256-GCM).
+
+• Защита от перебора — задержки после ошибки, лимит попыток,
+  при превышении контейнер может быть безвозвратно уничтожен.
+
+• Блокировка по времени (опционально) — открытие только в заданном окне UTC
+  (настраивается в «Настройки» → «Время»).
+
+• Пароль входа в программу — отдельно от пароля хранилища (по желанию).
+
+• Добавление, извлечение и удаление файлов через удобный интерфейс.
+
+Настройки безопасности и пароль входа сохраняются в папке data рядом с программой.
+При первом запуске будет создано встроенное хранилище."""
+
+
+def run_program_intro() -> bool:
+    """Окно описания программы при первом запуске. False — пользователь вышел."""
+    win = Tk()
+    win.title("Encrypted Vault — о программе")
+    win.minsize(520, 420)
+    win.geometry("560x480")
+
+    accepted = {"ok": False}
+
+    frm = ttk.Frame(win, padding=12)
+    frm.pack(fill="both", expand=True)
+    frm.rowconfigure(0, weight=1)
+    frm.columnconfigure(0, weight=1)
+
+    text_frm = ttk.Frame(frm)
+    text_frm.grid(row=0, column=0, sticky="nsew")
+    text_frm.rowconfigure(0, weight=1)
+    text_frm.columnconfigure(0, weight=1)
+
+    scroll = ttk.Scrollbar(text_frm, orient="vertical")
+    txt = tkinter.Text(text_frm, wrap="word", padx=8, pady=8, font=("Segoe UI", 10))
+    txt.insert("1.0", PROGRAM_INTRO)
+    txt.configure(state="disabled")
+    txt.grid(row=0, column=0, sticky="nsew")
+    scroll.grid(row=0, column=1, sticky="ns")
+    txt.configure(yscrollcommand=scroll.set)
+    scroll.configure(command=txt.yview)
+
+    btns = ttk.Frame(frm)
+    btns.grid(row=1, column=0, pady=(12, 0), sticky="e")
+
+    def on_continue() -> None:
+        accepted["ok"] = True
+        win.quit()
+
+    def on_exit() -> None:
+        win.quit()
+
+    ttk.Button(btns, text="Продолжить настройку", command=on_continue).pack(side="left", padx=4)
+    ttk.Button(btns, text="Выход", command=on_exit).pack(side="left", padx=4)
+
+    win.protocol("WM_DELETE_WINDOW", on_exit)
+    win.lift()
+    win.attributes("-topmost", True)
+    win.after(200, lambda: win.attributes("-topmost", False))
+    win.mainloop()
+    win.destroy()
+    return accepted["ok"]
+
+
+def _build_startup_security_notice(cfg: VaultSettings, path: Path) -> str | None:
+    """Текст предупреждения при запуске (пароль / дата) или None."""
+    if not vault_exists():
+        return None
+    try:
+        hdr = VaultContainer.read_header_public(path)
+    except (OSError, ValueError):
+        return None
+
+    lines: list[str] = []
+
+    if mode_uses_password(hdr.protection) and cfg.max_failed_attempts > 0:
+        n = cfg.max_failed_attempts
+        if cfg.destroy_on_max_attempts:
+            lines.append(
+                f"Внимание! После {n} неверных вводов пароля хранилища "
+                "контейнер будет безвозвратно уничтожен."
+            )
+        else:
+            lines.append(
+                f"Внимание! После {n} неверных вводов пароля доступ к хранилищу "
+                "будет заблокирован."
+            )
+        lines.append(
+            f"Задержка после ошибки: от {cfg.min_delay_seconds:g} с "
+            f"(множитель ×{cfg.delay_multiplier:g}, максимум {cfg.max_delay_seconds:g} с)."
+        )
+
+    if mode_uses_timelock(hdr.protection):
+        tl = hdr.timelock
+        lines.append(f"Режим защиты: {hdr.protection.label_ru()}.")
+        if tl.unlock_after_unix > 0:
+            lines.append(f"Открытие не раньше (UTC): {format_utc(tl.unlock_after_unix)}")
+        if tl.unlock_before_unix > 0:
+            lines.append(f"Доступ закрывается после (UTC): {format_utc(tl.unlock_before_unix)}")
+        if tl.unlock_after_unix <= 0 and tl.unlock_before_unix <= 0:
+            lines.append("Временное окно доступа задано в настройках контейнера.")
+
+    if not lines:
+        return None
+    return "\n\n".join(lines)
+
+
+def show_startup_security_notice(parent: Tk | None = None) -> None:
+    """Предупреждение после настройки: лимит пароля и/или дата открытия."""
+    cfg = load_settings(settings_path())
+    text = _build_startup_security_notice(cfg, vault_path())
+    if not text:
+        return
+    messagebox.showwarning("Внимание — безопасность хранилища", text, parent=parent)
+
+
 def run_first_setup() -> str | None:
     """Первый запуск: пароль входа (опционально) и создание встроенного контейнера."""
     win = Tk()
@@ -127,8 +255,8 @@ def run_first_setup() -> str | None:
 
     ttk.Label(
         frm,
-        text="Первый запуск\n\nХранилище создаётся внутри программы.\n"
-        f"Папка данных:\n{data_dir()}",
+        text="Настройка хранилища\n\nКонтейнер будет встроен в файл программы.\n"
+        f"Служебные данные: {data_dir()}",
         justify="center",
     ).pack(pady=(0, 12))
 
@@ -454,8 +582,15 @@ class VaultGuiApp:
         top.pack(fill="x", padx=10, pady=10)
         self._header = top
 
-        ttk.Label(top, text="Данные программы:").grid(row=0, column=0, sticky="w")
-        self._path_lbl = ttk.Label(top, text=str(data_dir()), wraplength=620)
+        from .exe_embed import is_embed_target
+
+        vault_loc = (
+            f"контейнер внутри {vault_path().name}"
+            if is_embed_target(vault_path())
+            else str(vault_path())
+        )
+        ttk.Label(top, text="Хранилище:").grid(row=0, column=0, sticky="w")
+        self._path_lbl = ttk.Label(top, text=vault_loc, wraplength=620)
         self._path_lbl.grid(row=0, column=1, sticky="w", padx=8)
 
         ttk.Label(top, text="Пароль входа:").grid(row=1, column=0, sticky="w", pady=(6, 0))
@@ -498,7 +633,7 @@ class VaultGuiApp:
         return None
 
     def _auto_open_vault(self) -> None:
-        if not self._internal_vault.is_file():
+        if not vault_exists():
             messagebox.showerror(
                 "Хранилище",
                 "Встроенный контейнер не найден. Удалите папку data и запустите снова.",
@@ -640,13 +775,22 @@ class VaultGuiApp:
 
     def _show_info(self) -> None:
         path = self._internal_vault
-        if not path.is_file():
+        if not vault_exists():
             return
         hdr = VaultContainer.read_header_public(path)
+        from .exe_embed import is_embed_target, read_embedded_vault_bytes
+
+        if is_embed_target(path):
+            vault_blob = read_embedded_vault_bytes(path) or b""
+            size_line = f"Встроено в exe: {len(vault_blob):,} байт"
+            path_line = f"Файл: {path.name} (в exe: LZMA + AES-256-GCM)"
+        else:
+            size_line = f"Размер: {path.stat().st_size:,} байт"
+            path_line = f"Путь: {path}"
         lines = [
             "Встроенное хранилище",
-            f"Путь: {path}",
-            f"Размер: {path.stat().st_size:,} байт",
+            path_line,
+            size_line,
             f"Защита: {hdr.protection.label_ru()}",
             f"Пароль входа в программу: {'да' if self.app_cfg.login_required else 'нет'}",
         ]
@@ -663,10 +807,14 @@ def main() -> None:
         data_dir()
         app_cfg = load_app_config()
 
-        if not app_cfg.vault_initialized or not vault_path().is_file():
+        if not app_cfg.vault_initialized or not vault_exists():
+            if not run_program_intro():
+                return
             session_pwd = run_first_setup()
         else:
             session_pwd = run_login()
+            if session_pwd is not None:
+                show_startup_security_notice()
 
         if session_pwd is None:
             return

@@ -1,0 +1,18 @@
+{
+  "max_failed_attempts": 5,
+  "destroy_on_max_attempts": true,
+  "min_delay_seconds": 3.0,
+  "delay_multiplier": 2.0,
+  "max_delay_seconds": 180.0,
+  "argon2_time_cost": 4,
+  "argon2_memory_kib": 262144,
+  "argon2_parallelism": 4,
+  "kdf_pepper": "",
+  "time_lock_enabled": false,
+  "time_lock_require_network": true,
+  "time_lock_require_local_match": true,
+  "time_lock_min_network_sources": 3,
+  "time_lock_network_agreement_seconds": 120.0,
+  "time_lock_max_local_skew_seconds": 300.0,
+  "time_lock_allow_offline": false
+}

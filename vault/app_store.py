@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -45,11 +44,8 @@ def program_dir() -> Path:
 
 
 def data_dir() -> Path:
-    """Внутренние данные программы (не отдельный файл «рядом» для пользователя)."""
-    if getattr(__import__("sys"), "frozen", False):
-        base = Path(os.environ.get("APPDATA", program_dir())) / "EncryptedVault"
-    else:
-        base = program_dir() / "data"
+    """Все данные программы — в папке data рядом с exe (или в корне проекта при разработке)."""
+    base = program_dir() / "data"
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -59,15 +55,46 @@ def config_path() -> Path:
 
 
 def vault_path() -> Path:
+    """Собранный exe: контейнер внутри файла программы; в разработке — data/vault.evlt."""
+    import sys
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve()
     return data_dir() / "vault.evlt"
+
+
+def vault_exists() -> bool:
+    from .exe_embed import vault_is_ready
+
+    return vault_is_ready(vault_path())
+
+
+def _settings_template_path() -> Path | None:
+    """Шаблон настроек рядом с exe или внутри onefile (_MEIPASS). Не ищем data/ проекта."""
+    import sys
+
+    for base in (program_dir(),):
+        candidate = base / "vault-settings.example.json"
+        if candidate.is_file():
+            return candidate
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidate = Path(meipass) / "vault-settings.example.json"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def settings_path() -> Path:
     p = data_dir() / "vault-settings.json"
     if not p.is_file():
-        src = program_dir() / "vault-settings.example.json"
-        if src.is_file():
-            p.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        template = _settings_template_path()
+        if template is not None:
+            p.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+        else:
+            from .settings import write_default_settings
+
+            write_default_settings(p)
     return p
 
 

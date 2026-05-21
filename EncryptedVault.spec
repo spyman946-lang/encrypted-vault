@@ -1,27 +1,29 @@
 # -*- mode: python ; coding: utf-8 -*-
-# pyinstaller EncryptedVault.spec
+# Сборка: только код приложения, без data/, *.evlt и пользовательских настроек.
+# Контейнер вшивается в exe (LZMA + AES-GCM); data\ — настройки при первом запуске
 
 block_cipher = None
 
 a = Analysis(
-    ['run_gui.py'],
+    ["run_gui.py"],
     pathex=[],
     binaries=[],
-    datas=[('vault-settings.example.json', '.')],
+    datas=[],  # без vault-settings.json / data — чистый exe
     hiddenimports=[
-        'argon2',
-        'argon2.low_level',
-        'cryptography',
-        'cryptography.hazmat.primitives.ciphers.aead',
-        'vault',
-        'vault.container',
-        'vault.crypto_utils',
-        'vault.protection',
-        'vault.settings',
-        'vault.timelock',
-        'vault.time_verify',
-        'vault.gui_app',
-        'vault.app_store',
+        "argon2",
+        "argon2.low_level",
+        "cryptography",
+        "cryptography.hazmat.primitives.ciphers.aead",
+        "vault",
+        "vault.container",
+        "vault.crypto_utils",
+        "vault.protection",
+        "vault.settings",
+        "vault.timelock",
+        "vault.time_verify",
+        "vault.gui_app",
+        "vault.app_store",
+        "vault.cli",
     ],
     hookspath=[],
     hooksconfig={},
@@ -42,7 +44,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='EncryptedVault',
+    name="EncryptedVault",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

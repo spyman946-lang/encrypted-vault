@@ -30,6 +30,6 @@ echo Запуск через Python...
 python run_gui.py
 if errorlevel 1 (
     echo.
-    echo Ошибка. Смотрите data\vault-error.log или %%APPDATA%%\EncryptedVault\vault-error.log
+    echo Ошибка. Смотрите data\vault-error.log (рядом с программой)
     pause
 )
