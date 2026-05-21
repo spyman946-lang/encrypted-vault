@@ -7,7 +7,7 @@ a = Analysis(
     ['run_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('vault-settings.json', '.')],
+    datas=[('vault-settings.example.json', '.')],
     hiddenimports=[
         'argon2',
         'argon2.low_level',

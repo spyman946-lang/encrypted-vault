@@ -29,7 +29,7 @@ if errorlevel 1 (
 )
 
 echo [3/3] Копирование...
-copy /Y vault-settings.json dist\ 2>nul
+copy /Y vault-settings.example.json dist\ 2>nul
 echo.
 echo Готово: dist\EncryptedVault.exe
 echo Запустите dist\EncryptedVault.exe
